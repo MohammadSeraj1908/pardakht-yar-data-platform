@@ -1,123 +1,64 @@
-﻿# Pardakht Yar Data Platform — Interview Task (Senior Data Engineer)
+﻿# Pardakht Yar Data Platform
 
-A simple but complete data platform: PostgreSQL source, CDC with **Debezium + Kafka Connect**, a raw/report warehouse, five Metabase cards, and automated tests. Everything starts with one command.
+A simple end-to-end data platform for a payment company: PostgreSQL source, CDC with **Debezium + Kafka**, raw/report warehouse layers, five marts and Metabase dashboards. Everything starts with one command.
 
-## Run with one command
+## Architecture
+
+```
+Simulator -> PostgreSQL source --(Debezium / Kafka)--> raw.*_events
+                                                            |
+                                        warehouse_modeler   v
+              report.merchants / merchant_history / transactions -> marts -> Metabase
+```
+
+The initial 5,000,000 rows are loaded directly into `raw.*_snapshot`. Kafka carries **changes only**.
+
+## Run
 
 ```bash
 docker compose up -d --build
 ```
 
-| Service | Address |
+| Service | URL |
 |---|---|
 | Metabase | http://localhost:3000 — `admin@pardakhtyar.local` / `PardakhtYar123!` |
-| Source Postgres | `localhost:5432` — app/app |
-| Warehouse Postgres | `localhost:5433` — app/app |
-| Kafka | `localhost:9092` |
-| Kafka Connect (REST) | http://localhost:8083 |
 | Kafka UI | http://localhost:8080 |
 | Debezium UI | http://localhost:8081 |
+| Kafka Connect REST | http://localhost:8083 |
+| Source Postgres | `localhost:5432` — app/app |
+| Warehouse Postgres | `localhost:5433` — app/app |
 
-First run takes about **5 minutes** (Kafka/Connect up ~1m, seed 5M rows ~1m, snapshot ~2m, initial model ~40s). Later runs are fast. Full reset: `docker compose down -v`.
+First run takes about 5 minutes (5M rows, snapshot, first model). Full reset: `docker compose down -v`.
+
+## Data flow
+
+1. `source_simulator.py` seeds 2,000 merchants and 5,000,000 transactions, then keeps changing data (new transactions, status updates, reversals, risk changes, deletes, one schema change).
+2. `source_snapshot_loader.py` loads the initial rows directly into `raw.*_snapshot`.
+3. `debezium_connector_init.py` registers the Debezium connector; changes go to Kafka topics `pardakht.core.merchants` and `pardakht.core.transactions`.
+4. `kafka_raw_consumer.py` writes each change to `raw.*_events` (at-least-once, dedup by Kafka offset).
+5. `warehouse_modeler.py` builds `report.*` incrementally: SCD2 risk history, risk/province at transaction time, and only the affected groups in the five marts.
+6. `metabase_setup.py` creates the datasources, 10 cards and 2 dashboards automatically.
+
+## Design choices
+
+- **Debezium + Kafka** for standard CDC: ordered changes, UPDATE/DELETE support, schema changes.
+- **Direct bulk snapshot** instead of sending 5M historical rows through Kafka.
+- **One PostgreSQL for raw and report**: simple, transactional, enough for this size.
+- **Incremental modeler** with a watermark; never rebuilds the full data.
+- **PII masking**: national ID and mobile are hashed (SHA-256 + salt) before the report layer.
+- **Schema changes**: new fields go to the `extra` JSONB column, so the pipeline never stops.
+
+## Commands
 
 ```bash
-# health check on Linux / WSL (containers, data, CDC, reconciliation)
-bash check.sh
-
-# full report (source, Debezium, Kafka, warehouse, last hour)
-bash full_check.sh
-
-# or just show container status
-docker compose ps -a
-
-# E2E tests (6 tests: keys, domains, PII masking, reconciliation, live CDC, schema evolution)
-docker compose --profile test run --rm tests
-
-# benchmark before/after -> reports/runtime_report.md and reports/bench.json
-docker compose --profile bench run --rm bench
+bash check.sh                                      # health check
+bash full_check.sh                                 # full report (source, Debezium, Kafka, warehouse)
+docker compose --profile test  run --rm tests      # 6 end-to-end tests
+docker compose --profile bench run --rm bench      # writes reports/runtime_report.md
 ```
 
-## Architecture
+## Notes
 
-```
-                       +--------------------------+
-   seed + changes      |  PostgreSQL Source       |   logical replication (pgoutput)
-  +------------------> |  core.merchants          | -------------------------------+
-  |                    |  core.transactions       |                                v
-+-+--------------+     +--------------------------+                    +-----------------------+
-|  Simulator     |                                                     |  Kafka Connect        |
-+----------------+                                                     |  + Debezium connector |
-                                                                       +-----------+-----------+
-                    bulk snapshot (direct, not via Kafka)                          | JSON changes
-        +------------------+                                                       v
-        | Snapshot Loader  | --------------+                            +--------------------+
-        +------------------+               |                            |  Kafka (KRaft)     |
-                                           v                            +---------+----------+
-                       +---------------------------------+                         |
-                       |  Warehouse PostgreSQL           | <-----------------------+
-                       |  raw  /  report  /  ops         |   Kafka Consumer (python)
-                       +---------------+-----------------+
-                                       | incremental modeler (watermark)
-                                       v
-                       +---------------------------------+
-                       |  marts (5 dashboard cards)      |
-                       +---------------+-----------------+
-                                       v
-                              +-----------------+
-                              |    Metabase     |
-                              +-----------------+
-```
-
-**Why these tools:** CDC with **Debezium** on **Kafka Connect** (standard, ordered by LSN, handles UPDATE/DELETE and schema changes) with a single-node KRaft Kafka and plain JSON (no Schema Registry/Avro) to keep it light. The 5M initial rows are loaded **directly** into `raw.*_snapshot` (bulk), so they do not pass through Kafka. **Alternatives rejected:** Debezium Server (limited sinks), Avro + Schema Registry (extra complexity), multi-broker Kafka/ZooKeeper (not needed for a 16 GB demo), custom test_decoding CDC (simple but not standard).
-
-## Layers and rules
-
-| Layer | Content | Rule |
-|---|---|---|
-| `raw` | `*_snapshot` + `*_events` (JSONB + Kafka offset + LSN) | append-only, schema-flexible, no transformation |
-| `report` | `merchants`, `merchant_history` (SCD2), `transactions` | enriched and masked; incremental only (watermark); no raw PII |
-| `ops` | watermark, state, affected keys | pipeline coordination only |
-
-## CDC (Debezium + Kafka)
-
-- **Initial snapshot**: direct bulk load into `raw.*_snapshot`; the connector is created after the snapshot so no change is lost.
-- **Kafka Connect**: `PostgresConnector` with `pgoutput`, a dedicated slot and publication, `tombstones.on.delete=true`, JSON without schema.
-- **Consumer**: reads the two topics (`pardakht.core.merchants`, `pardakht.core.transactions`) and writes `raw.*_events`; Kafka offsets are committed only after the warehouse commit (at-least-once) and `UNIQUE(topic, partition, offset)` removes duplicates.
-- **Schema change**: adding `installments` mid-run does not break the pipeline; the new column is added dynamically in `report.transactions`.
-- **UPDATE/DELETE**: `REPLICA IDENTITY FULL` gives the full `before` image.
-
-## Data model and grain
-
-| Table | Grain | Notes |
-|---|---|---|
-| `report.merchant_history` | merchant x time interval | risk/province/mcc over time (SCD2) |
-| `report.transactions` | transaction | current state + `risk_level_at_txn`, `province_at_txn` |
-| `mart_daily_sales` | day | successful amount and count |
-| `mart_daily_channel` | day x channel | success / total |
-| `mart_top_merchants` | month x merchant | successful amount |
-| `mart_fee_mcc_province` | mcc x province | successful fee (province at transaction time) |
-| `mart_monthly_success_risk` | month x risk | successful volume (risk at transaction time) |
-
-Card 5 fixes the original problem (it showed the merchant's current risk for old transactions) by using a temporal join on `merchant_history`.
-
-**Privacy:** `owner_national_id` and `owner_mobile` are hashed with SHA-256 and a salt before they enter `report`; raw values stay only in `raw` (restricted layer).
-
-## Benchmark (5M transactions, real run)
-
-| Card | Core (before) | Warehouse (after) | Speedup |
-|---|---:|---:|---:|
-| 1. Daily successful sales (90 days) | 777 ms | 0.5 ms | ~1553x |
-| 2. Daily success rate by channel (30 days) | 630 ms | 0.7 ms | ~900x |
-| 3. Top 10 merchants this month | 662 ms | 1.2 ms | ~552x |
-| 4. Fee by mcc/province (90 days) | 692 ms | 6.0 ms | ~115x |
-| 5. Risk at transaction time | 4441 ms | 0.4 ms | ~11103x |
-
-Reconciliation for the last 30 days: Core and Warehouse are exactly equal. Cards 1-3 return the same result; cards 4 and 5 are intentionally different because they use province/risk **at transaction time**.
-
-## Assumptions and limits
-
-- The snapshot has no history of merchant risk before it was taken; seeded transactions use the initial risk.
-- Single-node Kafka + JSON is for a simple demo; production would use multi-broker Kafka + Avro/Schema Registry.
-- Volume and rate are configurable with env vars (`SEED_TRANSACTIONS`, `TXNS_PER_SECOND`, ...). The whole stack uses about 5 GB of RAM.
-- Scale path: more brokers/partitions, distributed Kafka Connect, Iceberg/ClickHouse for higher volume, dbt for modeling.
-
+- 5 cards run on the marts (fast) and 5 baseline cards run on the source (slow) for comparison.
+- Configuration: copy `.env.example` to `.env` (seed size, transaction rate, schema change time).
+- Scale path: multi-broker Kafka + Schema Registry, Iceberg/ClickHouse, dbt.
