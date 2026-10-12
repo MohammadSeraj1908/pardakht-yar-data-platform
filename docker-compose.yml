@@ -1,0 +1,299 @@
+﻿# =============================================================================
+#  Pardakht Yar data platform
+#  Start everything with:   docker compose up -d --build
+#
+#  Reading guide:
+#   - Each service is one container.
+#   - "image"  = use an existing Docker image.
+#   - "build"  = build our own image from a Dockerfile.
+#   - "environment" = settings passed to the container.
+#   - "ports"  = host_port:container_port
+#   - "volumes" = keep data after the container stops.
+#   - "depends_on" = start order (our apps retry connections, so a simple list is enough).
+#   - "restart: unless-stopped" = always keep this service running.
+#   - "restart: on-failure" = one-shot job, retry only if it fails.
+# =============================================================================
+
+name: payment-data-platform
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1) SOURCE DATABASE - the operational system we read changes from
+  # ---------------------------------------------------------------------------
+  postgres-source:
+    image: postgres:17
+    command:
+      - postgres
+      - -c
+      - wal_level=logical          # needed for Debezium logical replication
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+      - -c
+      - synchronous_commit=off     # faster seed for the demo
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - source-data:/var/lib/postgresql/data
+      - ./db/source/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # ---------------------------------------------------------------------------
+  # 2) WAREHOUSE DATABASE - raw + report + ops layers
+  # ---------------------------------------------------------------------------
+  postgres-warehouse:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: warehouse
+    ports:
+      - "5433:5432"
+    volumes:
+      - warehouse-data:/var/lib/postgresql/data
+      - ./db/warehouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # ---------------------------------------------------------------------------
+  # 3) KAFKA - single node, KRaft mode (no ZooKeeper)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    user: root                     # the named volume is root-owned
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx768m"
+      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
+    volumes:
+      - kafka-data:/tmp/kafka-logs
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # 4) KAFKA CONNECT + DEBEZIUM - the CDC engine
+  #    Built from ./docker/connect (official Kafka image + Debezium plugin)
+  # ---------------------------------------------------------------------------
+  kafka-connect:
+    build: ./docker/connect
+    ports:
+      - "8083:8083"
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx768m"
+    depends_on:
+      - kafka
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8083 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 40s
+
+  # ---------------------------------------------------------------------------
+  # 5) WEB UIs
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: pardakht
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    depends_on:
+      - kafka
+      - kafka-connect
+    restart: unless-stopped
+
+  debezium-ui:
+    image: debezium/debezium-ui:2.5
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CONNECT_URIS: http://kafka-connect:8083
+    depends_on:
+      - kafka-connect
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 6) SIMULATOR - creates 5M rows, then keeps changing data
+  # ---------------------------------------------------------------------------
+  simulator:
+    build: ./app
+    command: python source_simulator.py
+    environment:
+      SOURCE_DSN: postgresql://app:app@postgres-source:5432/app
+      SEED_MERCHANTS: 2000
+      SEED_TRANSACTIONS: 5000000
+      TXNS_PER_SECOND: 20
+      SCHEMA_CHANGE_AFTER_MINUTES: 3
+    depends_on:
+      - postgres-source
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 7) SNAPSHOT LOADER - loads the initial 5M rows directly (one-shot job)
+  # ---------------------------------------------------------------------------
+  snapshot-loader:
+    build: ./app
+    command: python source_snapshot_loader.py
+    environment:
+      SOURCE_DSN: postgresql://app:app@postgres-source:5432/app
+      WAREHOUSE_DSN: postgresql://app:app@postgres-warehouse:5432/warehouse
+    depends_on:
+      - postgres-source
+      - postgres-warehouse
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # 8) DEBEZIUM INIT - registers the connector, then exits (one-shot job)
+  # ---------------------------------------------------------------------------
+  debezium-init:
+    build: ./app
+    command: python debezium_connector_init.py
+    environment:
+      SOURCE_DSN: postgresql://app:app@postgres-source:5432/app
+      CONNECT_URL: http://kafka-connect:8083
+      SOURCE_HOST: postgres-source
+      SOURCE_PORT: 5432
+      SOURCE_DBNAME: app
+      SOURCE_USER: app
+      SOURCE_PASSWORD: app
+    depends_on:
+      - postgres-source
+      - kafka-connect
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # 9) KAFKA CONSUMER - Kafka topics -> raw.*_events
+  # ---------------------------------------------------------------------------
+  kafka-consumer:
+    build: ./app
+    command: python kafka_raw_consumer.py
+    environment:
+      WAREHOUSE_DSN: postgresql://app:app@postgres-warehouse:5432/warehouse
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_GROUP: raw-loader
+    depends_on:
+      - kafka
+      - postgres-warehouse
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 10) MODELER - raw events -> report tables + marts (incremental)
+  # ---------------------------------------------------------------------------
+  modeler:
+    build: ./app
+    command: python warehouse_modeler.py
+    environment:
+      WAREHOUSE_DSN: postgresql://app:app@postgres-warehouse:5432/warehouse
+      PII_SALT: pardakht-yar-demo-salt
+    depends_on:
+      - postgres-warehouse
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 11) METABASE - dashboards (provisioned automatically)
+  # ---------------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase:latest
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_TYPE: h2
+      MB_DB_FILE: /metabase-data/metabase.db
+      MB_SITE_URL: http://localhost:3000
+      MB_SITE_LOCALE: en
+    volumes:
+      - metabase-data:/metabase-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    restart: unless-stopped
+
+  metabase-init:
+    build: ./app
+    command: python metabase_setup.py
+    environment:
+      MB_URL: http://metabase:3000
+      MB_ADMIN_EMAIL: admin@pardakhtyar.local
+      MB_ADMIN_PASSWORD: PardakhtYar123!
+      SOURCE_HOST: postgres-source
+      WAREHOUSE_HOST: postgres-warehouse
+    depends_on:
+      - metabase
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # 12) OPTIONAL TOOLS (do not start with "docker compose up")
+  #     docker compose --profile test  run --rm tests
+  #     docker compose --profile bench run --rm bench
+  # ---------------------------------------------------------------------------
+  tests:
+    build: ./tests
+    command: pytest -v
+    environment:
+      SOURCE_DSN: postgresql://app:app@postgres-source:5432/app
+      WAREHOUSE_DSN: postgresql://app:app@postgres-warehouse:5432/warehouse
+      PII_SALT: pardakht-yar-demo-salt
+    profiles: ["test"]
+    depends_on:
+      - postgres-source
+      - postgres-warehouse
+
+  bench:
+    build: ./app
+    command: python metabase_bench.py
+    environment:
+      SOURCE_DSN: postgresql://app:app@postgres-source:5432/app
+      WAREHOUSE_DSN: postgresql://app:app@postgres-warehouse:5432/warehouse
+    volumes:
+      - ./reports:/reports
+    profiles: ["bench"]
+    depends_on:
+      - postgres-source
+      - postgres-warehouse
+
+# -----------------------------------------------------------------------------
+# Named volumes: data survives container restarts.
+# Remove everything (including data) with: docker compose down -v
+# -----------------------------------------------------------------------------
+volumes:
+  source-data:
+  warehouse-data:
+  metabase-data:
+  kafka-data:

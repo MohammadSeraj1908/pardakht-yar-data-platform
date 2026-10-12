@@ -1,0 +1,116 @@
+<!DOCTYPE html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Learning Guide - Pardakht Yar Data Platform</title>
+<style>
+body{margin:0;background:#f5f7fb;color:#17223b;font-family:Segoe UI,Tahoma,sans-serif;line-height:1.8}
+.page{max-width:1050px;margin:0 auto;padding:24px 16px 70px}
+.hero{background:linear-gradient(135deg,#23347a,#3b5bdb 60%,#5f7cf5);color:#fff;border-radius:18px;padding:28px 32px;box-shadow:0 14px 34px rgba(35,52,122,.25)}
+.hero h1{margin:0 0 6px;font-size:26px}.hero p{margin:0;color:#e6ebff}
+.card{background:#fff;border:1px solid #dfe5f1;border-radius:16px;padding:18px 24px;margin-top:16px}
+h2{color:#23347a;border-bottom:2px solid #3b5bdb;padding-bottom:8px;font-size:20px}
+h3{color:#2c3e78;font-size:16px;margin:14px 0 4px}
+.flow{background:#0f172a;color:#dbe7ff;border-radius:12px;padding:16px;font-family:Consolas,monospace;font-size:13px;overflow-x:auto;white-space:pre}
+.step{display:flex;gap:12px;padding:10px 0;border-bottom:1px dashed #e6ebf5}
+.step .n{background:#3b5bdb;color:#fff;border-radius:50%;width:30px;height:30px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-weight:700}
+.step h4{margin:0;color:#23347a}.step p{margin:2px 0 0;color:#33415c}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}th,td{border:1px solid #dfe5f1;padding:8px 10px}th{background:#eef2fb;color:#23347a}
+pre{background:#0f172a;color:#dbe7ff;border-radius:10px;padding:12px 14px;font-family:Consolas,monospace;font-size:12.5px;overflow-x:auto;white-space:pre}
+code{background:#eef2fb;color:#1f3a8a;border-radius:5px;padding:1px 5px;font-family:Consolas,monospace}pre code{background:none;color:inherit;padding:0}
+.file{border:1px solid #dfe5f1;border-radius:14px;padding:12px 16px;margin:10px 0;background:#fbfcff}
+.file h3{margin:0}.file p{margin:4px 0 8px;color:#33415c}
+.g{display:inline-block;width:48%;vertical-align:top;margin:6px 1%;background:#f8faff;border:1px solid #e2e9f7;border-radius:10px;padding:8px 12px}
+.g b{color:#23347a}.g p{margin:2px 0 0;font-size:13.5px;color:#33415c}
+footer{text-align:center;color:#5b6b8c;font-size:13px;margin-top:24px}
+@media(max-width:700px){.g{width:100%;margin:6px 0}}
+</style></head><body><div class="page">
+<header class="hero"><h1>How the platform works - simple learning guide</h1><p>Read this once and you can explain the whole project.</p></header>
+
+<section class="card"><h2>1) The big flow (one line)</h2>
+<div class="flow">Simulator -> Source PostgreSQL -> Debezium -> Kafka -> Consumer -> raw -> Modeler -> report/marts -> Metabase</div>
+<p><b>Remember:</b> the 5 million initial rows are loaded directly into raw snapshots. Kafka carries only changes.</p></section>
+
+<section class="card"><h2>2) The story in 8 steps</h2><div class="step"><span class="n">1</span><div><h4>Simulator creates data</h4><p>It inserts 2,000 merchants and 5,000,000 transactions, then keeps changing the data (new transactions, status updates, reversals, risk changes, deletes).</p></div></div><div class="step"><span class="n">2</span><div><h4>Snapshot loader copies the 5M rows</h4><p>It loads them directly into raw.transactions_snapshot. They do not go through Kafka.</p></div></div><div class="step"><span class="n">3</span><div><h4>Debezium reads the WAL</h4><p>Debezium (inside Kafka Connect) reads every INSERT/UPDATE/DELETE from PostgreSQL and sends it to Kafka as JSON.</p></div></div><div class="step"><span class="n">4</span><div><h4>Kafka stores the changes</h4><p>Two topics: pardakht.core.merchants and pardakht.core.transactions.</p></div></div><div class="step"><span class="n">5</span><div><h4>Kafka consumer writes raw events</h4><p>It reads Kafka and inserts each change into raw.*_events with the Kafka offset (at-least-once).</p></div></div><div class="step"><span class="n">6</span><div><h4>Modeler builds the report</h4><p>It reads only new events (watermark), keeps risk history (SCD2), and adds risk/province at transaction time.</p></div></div><div class="step"><span class="n">7</span><div><h4>Modeler refreshes the marts</h4><p>Only the affected days/months/merchants are recomputed. Cards read these small tables.</p></div></div><div class="step"><span class="n">8</span><div><h4>Metabase shows dashboards</h4><p>Two dashboards: the slow one on Core and the fast one on Warehouse.</p></div></div></section>
+
+<section class="card"><h2>3) What each container does</h2>
+<table><thead><tr><th>Container</th><th>Job</th></tr></thead><tbody><tr><td><code>postgres-source</code></td><td>The operational database we read changes from.</td></tr><tr><td><code>postgres-warehouse</code></td><td>The analytics database: raw, report and ops schemas.</td></tr><tr><td><code>kafka</code></td><td>One Kafka broker in KRaft mode. Stores change messages.</td></tr><tr><td><code>kafka-connect</code></td><td>Kafka Connect + the Debezium plugin. The CDC engine.</td></tr><tr><td><code>kafka-ui</code></td><td>Web UI for topics and messages (port 8080).</td></tr><tr><td><code>debezium-ui</code></td><td>Web UI for connectors (port 8081).</td></tr><tr><td><code>simulator</code></td><td>Creates and changes the source data.</td></tr><tr><td><code>snapshot-loader</code></td><td>One-shot job: loads the initial 5M rows.</td></tr><tr><td><code>debezium-init</code></td><td>One-shot job: registers the Debezium connector.</td></tr><tr><td><code>kafka-consumer</code></td><td>Moves Kafka messages into raw.*_events.</td></tr><tr><td><code>modeler</code></td><td>Builds report tables and marts incrementally.</td></tr><tr><td><code>metabase</code></td><td>Dashboards (port 3000).</td></tr><tr><td><code>metabase-init</code></td><td>One-shot job: creates cards and dashboards.</td></tr><tr><td><code>tests / bench</code></td><td>Optional tools, run with --profile test / bench.</td></tr></tbody></table></section>
+
+<section class="card"><h2>4) The important code (file by file)</h2><div class="file"><h3><code>app/source_simulator.py</code></h3><p>Creates the source data and changes it.</p><pre><code>
+# 5 million rows in one INSERT
+insert into core.transactions (...)
+select nextval(&#x27;core.txn_id_seq&#x27;), 1 + floor(random() * 2000)::bigint, ...
+from generate_series(1, 5000000) g;
+
+# every new transaction gets a unique id from a sequence
+select nextval(&#x27;core.txn_id_seq&#x27;);
+
+# schema change in the middle of the run
+alter table core.transactions add column if not exists installments integer;</code></pre></div><div class="file"><h3><code>app/source_snapshot_loader.py</code></h3><p>Bulk loads the initial rows (not through Kafka).</p><pre><code>
+# server-side cursor reads the source in batches
+with src.cursor(name=&quot;snap_transactions&quot;) as reader:
+    reader.itersize = 20000
+    reader.execute(&quot;select ... from core.transactions&quot;)
+    rows = reader.fetchmany(20000)
+
+# write each batch to the warehouse
+execute_values(writer, &quot;insert into raw.transactions_snapshot (...) values %s&quot;, rows)</code></pre></div><div class="file"><h3><code>app/debezium_connector_init.py</code></h3><p>Registers the connector with Kafka Connect.</p><pre><code>
+CONFIG = {
+  &quot;connector.class&quot;: &quot;io.debezium.connector.postgresql.PostgresConnector&quot;,
+  &quot;plugin.name&quot;: &quot;pgoutput&quot;,
+  &quot;slot.name&quot;: &quot;debezium_slot&quot;,
+  &quot;snapshot.mode&quot;: &quot;never&quot;,          # snapshot is done by snapshot_loader
+  &quot;table.include.list&quot;: &quot;core.merchants,core.transactions&quot;,
+}
+http(&quot;POST&quot;, &quot;http://kafka-connect:8083/connectors&quot;, {&quot;name&quot;: NAME, &quot;config&quot;: CONFIG})</code></pre></div><div class="file"><h3><code>app/kafka_raw_consumer.py</code></h3><p>Moves Kafka changes into raw events.</p><pre><code>
+OPS = {&quot;c&quot;: &quot;I&quot;, &quot;r&quot;: &quot;I&quot;, &quot;u&quot;: &quot;U&quot;, &quot;d&quot;: &quot;D&quot;}   # Debezium op -&gt; our op
+
+insert into raw.transactions_events (..., payload, kafka_offset, ...)
+values (...) on conflict (kafka_topic, kafka_partition, kafka_offset) do nothing;
+
+# commit the Kafka offset only after the database commit
+wh.commit()
+consumer.commit()</code></pre></div><div class="file"><h3><code>app/warehouse_modeler.py</code></h3><p>Builds report tables and marts, incrementally.</p><pre><code>
+# 1) read only new events
+select * from raw.transactions_events where event_id &gt; %s order by event_id limit 5000;
+
+# 2) risk at transaction time (SCD2 history)
+left join lateral (
+    select risk_level, province from report.merchant_history h
+    where h.merchant_id = s.merchant_id and h.valid_from &lt;= s.created_at
+    order by h.valid_from desc limit 1
+) h on true;
+
+# 3) refresh only the affected groups
+delete from report.mart_daily_sales m using ops.aff_daily k where m.day = k.day;</code></pre></div><div class="file"><h3><code>app/metabase_setup.py</code></h3><p>Creates datasources, cards and dashboards automatically.</p><pre><code>
+# create a native SQL card
+payload = {&quot;name&quot;: name, &quot;display&quot;: display,
+           &quot;dataset_query&quot;: {&quot;database&quot;: db_id, &quot;type&quot;: &quot;native&quot;,
+                             &quot;native&quot;: {&quot;query&quot;: sql}}}
+http(&quot;POST&quot;, &quot;http://metabase:3000/api/card&quot;, payload, headers)</code></pre></div><div class="file"><h3><code>app/metabase_bench.py</code></h3><p>Measures before/after for the five cards.</p><pre><code>
+for name, core_sql, warehouse_sql in zip(NAMES, CORE_QUERIES, WAREHOUSE_QUERIES):
+    core_ms = measure(core, core_sql)
+    wh_ms = measure(warehouse, warehouse_sql)
+    print(name, core_ms, wh_ms)
+
+open(&quot;/reports/runtime_report.md&quot;, &quot;w&quot;).write(markdown_table)</code></pre></div><div class="file"><h3><code>tests/test_pipeline.py</code></h3><p>Six end-to-end checks.</p><pre><code>
+test_keys_are_unique              # no duplicate keys
+test_allowed_domains              # valid status/channel/risk values
+test_pii_is_hashed                # national id/mobile hashed
+test_reconciliation_with_core     # Core == Warehouse
+test_cdc_insert_update_delete     # live CDC works
+test_schema_evolution_installments # new column does not break the pipeline</code></pre></div></section>
+
+<section class="card"><h2>5) The tables (what one row means)</h2>
+<table><thead><tr><th>Table</th><th>Grain</th><th>Content</th></tr></thead><tbody><tr><td><code>raw.merchants_snapshot</code></td><td>one row per merchant</td><td>initial merchant data</td></tr><tr><td><code>raw.transactions_snapshot</code></td><td>one row per transaction</td><td>initial 5,000,000 rows</td></tr><tr><td><code>raw.merchants_events</code></td><td>one Kafka message</td><td>every merchant change</td></tr><tr><td><code>raw.transactions_events</code></td><td>one Kafka message</td><td>every transaction change</td></tr><tr><td><code>report.merchants</code></td><td>one row per merchant</td><td>current state + hashed PII</td></tr><tr><td><code>report.merchant_history</code></td><td>merchant + time interval</td><td>risk/province history (SCD2)</td></tr><tr><td><code>report.transactions</code></td><td>one row per transaction</td><td>state + risk/province at transaction time</td></tr><tr><td><code>report.mart_*</code></td><td>day/month/merchant</td><td>small pre-aggregated tables for the cards</td></tr></tbody></table></section>
+
+<section class="card"><h2>6) Glossary (simple words)</h2><div class="g"><b>CDC</b><p>Change Data Capture: reading every change from a database.</p></div><div class="g"><b>LSN</b><p>Log Sequence Number: the position in the database log. It keeps changes in order.</p></div><div class="g"><b>Slot / publication</b><p>PostgreSQL objects that Debezium uses to read the WAL.</p></div><div class="g"><b>At-least-once</b><p>Every message is stored at least once; duplicates are removed by a unique key.</p></div><div class="g"><b>SCD2</b><p>Slowly Changing Dimension type 2: keep history using valid_from / valid_to.</p></div><div class="g"><b>Watermark</b><p>The last processed event id. It lets us read only new events.</p></div><div class="g"><b>Grain</b><p>What one row in a table means (for example: one transaction).</p></div><div class="g"><b>Mart</b><p>A small table that is already aggregated for a dashboard card.</p></div><div class="g"><b>Bulk snapshot</b><p>Load the initial data directly, not through Kafka.</p></div></section>
+
+<section class="card"><h2>7) Explain the project in 60 seconds</h2>
+<p>"I built a data platform for a payment company. A simulator fills a PostgreSQL source with 2,000 merchants and 5 million transactions. Debezium reads the database log and sends every change to Kafka. A small Python consumer stores those changes in a raw event table. A modeler then builds the report layer incrementally: it keeps merchant risk history as SCD2 and adds risk and province at transaction time. Five small marts power five Metabase cards. The benchmark shows the cards went from hundreds of milliseconds on the source to less than 10 milliseconds on the marts. Everything starts with one docker compose command and six end-to-end tests pass."</p></section>
+
+<section class="card"><h2>8) Commands to remember</h2>
+<pre><code>docker compose up -d --build                  # start everything
+docker compose ps -a                          # check containers
+docker compose --profile test run --rm tests  # 6 E2E tests
+docker compose --profile bench run --rm bench # write reports/runtime_report.md
+docker compose down -v                        # full reset</code></pre></section>
+
+<footer>payment-data-platform - learning guide</footer>
+</div></body></html>

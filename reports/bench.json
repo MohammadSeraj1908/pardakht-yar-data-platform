@@ -1,0 +1,106 @@
+{
+  "generated_at": "2026-10-10T18:37:06+00:00",
+  "iterations": 3,
+  "cards": [
+    {
+      "card": "1 - فروش موفق روزانه (۹۰ روز)",
+      "core_ms": 776.7,
+      "warehouse_ms": 0.5,
+      "speedup": 1479.4,
+      "core_rows": 91,
+      "warehouse_rows": 91,
+      "core_runs_ms": [
+        1031.4,
+        776.7,
+        679.9
+      ],
+      "warehouse_runs_ms": [
+        0.5,
+        0.4,
+        0.6
+      ]
+    },
+    {
+      "card": "2 - نرخ موفقیت کانال (۳۰ روز)",
+      "core_ms": 630.0,
+      "warehouse_ms": 0.7,
+      "speedup": 871.5,
+      "core_rows": 93,
+      "warehouse_rows": 93,
+      "core_runs_ms": [
+        630.0,
+        674.9,
+        580.6
+      ],
+      "warehouse_runs_ms": [
+        0.9,
+        0.7,
+        0.7
+      ]
+    },
+    {
+      "card": "3 - پذیرندگان برتر ماه",
+      "core_ms": 661.8,
+      "warehouse_ms": 1.2,
+      "speedup": 571.8,
+      "core_rows": 10,
+      "warehouse_rows": 10,
+      "core_runs_ms": [
+        638.8,
+        661.8,
+        693.7
+      ],
+      "warehouse_runs_ms": [
+        1.2,
+        1.1,
+        1.2
+      ]
+    },
+    {
+      "card": "4 - کارمزد صنف/استان (۹۰ روز)",
+      "core_ms": 691.8,
+      "warehouse_ms": 6.0,
+      "speedup": 114.7,
+      "core_rows": 80,
+      "warehouse_rows": 80,
+      "core_runs_ms": [
+        616.9,
+        691.8,
+        803.9
+      ],
+      "warehouse_runs_ms": [
+        6.0,
+        6.1,
+        5.9
+      ]
+    },
+    {
+      "card": "5 - ریسک پذیرنده",
+      "core_ms": 4441.0,
+      "warehouse_ms": 0.4,
+      "speedup": 10826.6,
+      "core_rows": 21,
+      "warehouse_rows": 21,
+      "core_runs_ms": [
+        3766.1,
+        6470.1,
+        4441.0
+      ],
+      "warehouse_runs_ms": [
+        0.4,
+        0.4,
+        0.4
+      ]
+    }
+  ],
+  "reconciliation_last_30_days": {
+    "core": {
+      "amount": 12906018700752,
+      "count": 667272
+    },
+    "warehouse": {
+      "amount": 12906018700752,
+      "count": 667272
+    }
+  }
+}
