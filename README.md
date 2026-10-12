@@ -24,6 +24,9 @@ First run takes about **5 minutes** (Kafka/Connect up ~1m, seed 5M rows ~1m, sna
 # health check on Linux / WSL (containers, data, CDC, reconciliation)
 bash check.sh
 
+# full report (source, Debezium, Kafka, warehouse, last hour)
+bash full_check.sh
+
 # or just show container status
 docker compose ps -a
 
