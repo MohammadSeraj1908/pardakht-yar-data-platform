@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Simple health check for Linux / WSL.
 # Usage: bash check.sh
 set -u

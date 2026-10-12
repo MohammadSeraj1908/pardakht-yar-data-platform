@@ -71,8 +71,8 @@ def seed(conn):
         cur.execute("create sequence if not exists core.txn_id_seq")
         cur.execute("""select setval('core.txn_id_seq',
                        (select greatest(coalesce(max(transaction_id), 0) + 1, 1) from core.transactions), false)""")
-    conn.commit()
     mark(conn, "seed_done")
+    conn.commit()
     print("seed done", flush=True)
 
 
